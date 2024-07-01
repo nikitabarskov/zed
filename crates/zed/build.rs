@@ -46,19 +46,20 @@ fn main() {
 
     #[cfg(target_os = "windows")]
     {
-        // todo(windows): This is to avoid stack overflow. Remove it when solved.
-        println!("cargo:rustc-link-arg=/stack:{}", 8 * 1024 * 1024);
+        #[cfg(target_env = "msvc")]
+        {
+            // todo(windows): This is to avoid stack overflow. Remove it when solved.
+            println!("cargo:rustc-link-arg=/stack:{}", 8 * 1024 * 1024);
+        }
 
-        let manifest = std::path::Path::new("resources/windows/manifest.xml");
-        println!("cargo:rerun-if-changed={}", manifest.display());
-        println!("cargo:rustc-link-arg-bins=/MANIFEST:EMBED");
+        let icon = std::path::Path::new("resources/windows/app-icon.ico");
+        println!("cargo:rerun-if-changed={}", icon.display());
 
-        println!(
-            "cargo:rustc-link-arg-bins=/MANIFESTINPUT:{}",
-            manifest.canonicalize().unwrap().display()
-        );
+        let mut res = winresource::WindowsResource::new();
+        res.set_icon(icon.to_str().unwrap());
+        res.set("FileDescription", "Zed");
+        res.set("ProductName", "Zed");
 
-        let res = winresource::WindowsResource::new();
         if let Err(e) = res.compile() {
             eprintln!("{}", e);
             std::process::exit(1);

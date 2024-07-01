@@ -20,7 +20,7 @@ pub fn refresh_matching_bracket_highlights(editor: &mut Editor, cx: &mut ViewCon
         .innermost_enclosing_bracket_ranges(head..head, None)
     {
         editor.highlight_background::<MatchingBracketHighlight>(
-            vec![
+            &[
                 opening_range.to_anchors(&snapshot.buffer_snapshot),
                 closing_range.to_anchors(&snapshot.buffer_snapshot),
             ],
@@ -55,12 +55,14 @@ mod tests {
                                 start: "{".to_string(),
                                 end: "}".to_string(),
                                 close: false,
+                                surround: false,
                                 newline: true,
                             },
                             BracketPair {
                                 start: "(".to_string(),
                                 end: ")".to_string(),
                                 close: false,
+                                surround: false,
                                 newline: true,
                             },
                         ],

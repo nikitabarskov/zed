@@ -14,25 +14,23 @@ from typer import Typer
 app: Typer = typer.Typer()
 
 DATETIME_FORMAT: str = "%m/%d/%Y %I:%M %p"
-CORE_LABELS: set[str] = set(
-    [
-        "defect",
-        "design",
-        "documentation",
-        "enhancement",
-        "panic / crash",
-        "platform support",
-    ]
-)
+CORE_LABELS: set[str] = {
+    "defect",
+    "design",
+    "documentation",
+    "enhancement",
+    "panic / crash",
+}
 # A set of labels for adding in labels that we want present in the final
 # report, but that we don't want being defined as a core label, since issues
 # with without core labels are flagged as errors.
-ADDITIONAL_LABELS: set[str] = set(["ai", "vim"])
-IGNORED_LABELS: set[str] = set(
-    [
-        "meta",
-    ]
-)
+ADDITIONAL_LABELS: set[str] = {
+    "ai",
+    "linux",
+    "vim",
+    "windows",
+}
+IGNORED_LABEL_TEXT: str = "ignore top-ranking issues"
 ISSUES_PER_LABEL: int = 20
 
 
@@ -42,14 +40,13 @@ class IssueData:
         self.like_count: int = issue._rawData["reactions"]["+1"]  # type: ignore [attr-defined]
         self.creation_datetime: str = issue.created_at.strftime(DATETIME_FORMAT)
         # TODO: Change script to support storing labels here, rather than directly in the script
-        self.labels: set[str] = set(label["name"] for label in issue._rawData["labels"])  # type: ignore [attr-defined]
+        self.labels: set[str] = {label["name"] for label in issue._rawData["labels"]}  # type: ignore [attr-defined]
 
 
 @app.command()
 def main(
-    issue_reference_number: int,
     github_token: Optional[str] = None,
-    prod: bool = False,
+    issue_reference_number: Optional[int] = None,
     query_day_interval: Optional[int] = None,
 ) -> None:
     start_time: datetime = datetime.now()
@@ -58,7 +55,9 @@ def main(
 
     if query_day_interval:
         tz = timezone("america/new_york")
-        current_time = datetime.now(tz).replace(hour=0, minute=0, second=0, microsecond=0)
+        current_time = datetime.now(tz).replace(
+            hour=0, minute=0, second=0, microsecond=0
+        )
         start_date = current_time - timedelta(days=query_day_interval)
 
     # GitHub Workflow will pass in the token as an environment variable,
@@ -85,7 +84,7 @@ def main(
         error_message_to_erroneous_issue_data,
     )
 
-    if prod:
+    if issue_reference_number:
         top_ranking_issues_issue: Issue = repository.get_issue(issue_reference_number)
         top_ranking_issues_issue.edit(body=issue_text)
     else:
@@ -113,12 +112,12 @@ def get_issue_maps(
         label_to_issues
     )
 
-    error_message_to_erroneous_issues: defaultdict[
-        str, list[Issue]
-    ] = get_error_message_to_erroneous_issues(github, repository)
-    error_message_to_erroneous_issue_data: dict[
-        str, list[IssueData]
-    ] = get_error_message_to_erroneous_issue_data(error_message_to_erroneous_issues)
+    error_message_to_erroneous_issues: defaultdict[str, list[Issue]] = (
+        get_error_message_to_erroneous_issues(github, repository)
+    )
+    error_message_to_erroneous_issue_data: dict[str, list[IssueData]] = (
+        get_error_message_to_erroneous_issue_data(error_message_to_erroneous_issues)
+    )
 
     # Create a new dictionary with labels ordered by the summation the of likes on the associated issues
     labels = list(label_to_issue_data.keys())
@@ -146,16 +145,13 @@ def get_label_to_issues(
     label_to_issues: defaultdict[str, list[Issue]] = defaultdict(list)
 
     labels: set[str] = CORE_LABELS | ADDITIONAL_LABELS
-    ignored_labels_text: str = " ".join(
-        [f'-label:"{label}"' for label in IGNORED_LABELS]
-    )
 
     date_query: str = (
         f"created:>={start_date.strftime('%Y-%m-%d')}" if start_date else ""
     )
 
     for label in labels:
-        query: str = f'repo:{repository.full_name} is:open is:issue {date_query} label:"{label}" {ignored_labels_text} sort:reactions-+1-desc'
+        query: str = f'repo:{repository.full_name} is:open is:issue {date_query} label:"{label}" -label:"{IGNORED_LABEL_TEXT}" sort:reactions-+1-desc'
 
         issues = github.search_issues(query)
 
@@ -167,7 +163,7 @@ def get_label_to_issues(
 
 
 def get_label_to_issue_data(
-    label_to_issues: defaultdict[str, list[Issue]]
+    label_to_issues: defaultdict[str, list[Issue]],
 ) -> dict[str, list[IssueData]]:
     label_to_issue_data: dict[str, list[IssueData]] = {}
 
@@ -192,8 +188,8 @@ def get_error_message_to_erroneous_issues(
 ) -> defaultdict[str, list[Issue]]:
     error_message_to_erroneous_issues: defaultdict[str, list[Issue]] = defaultdict(list)
 
-    # Query for all open issues that don't have either a core or ignored label and mark those as erroneous
-    filter_labels: set[str] = CORE_LABELS | IGNORED_LABELS
+    # Query for all open issues that don't have either a core or the ignored label and mark those as erroneous
+    filter_labels: set[str] = CORE_LABELS | {IGNORED_LABEL_TEXT}
     filter_labels_text: str = " ".join([f'-label:"{label}"' for label in filter_labels])
     query: str = f"repo:{repository.full_name} is:open is:issue {filter_labels_text}"
 
@@ -242,15 +238,12 @@ def get_issue_text(
         core_labels_text: str = ", ".join(
             f'"{core_label}"' for core_label in CORE_LABELS
         )
-        ignored_labels_text: str = ", ".join(
-            f'"{ignored_label}"' for ignored_label in IGNORED_LABELS
-        )
 
         issue_text_lines.extend(
             [
                 "## errors with issues (this section only shows when there are errors with issues)\n",
                 f"This script expects every issue to have at least one of the following core labels: {core_labels_text}",
-                f"This script currently ignores issues that have one of the following labels: {ignored_labels_text}\n",
+                f"This script currently ignores issues that have the following label: {IGNORED_LABEL_TEXT}\n",
                 "### what to do?\n",
                 "- Adjust the core labels on an issue to put it into a correct state or add a currently-ignored label to the issue",
                 "- Adjust the core and ignored labels registered in this script",

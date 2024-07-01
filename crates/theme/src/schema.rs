@@ -1,5 +1,5 @@
 use anyhow::Result;
-use gpui::{FontStyle, FontWeight, HighlightStyle, Hsla};
+use gpui::{FontStyle, FontWeight, HighlightStyle, Hsla, WindowBackgroundAppearance};
 use indexmap::IndexMap;
 use palette::FromColor;
 use schemars::gen::SchemaGenerator;
@@ -33,6 +33,25 @@ pub enum AppearanceContent {
     Dark,
 }
 
+/// The background appearance of the window.
+#[derive(Debug, PartialEq, Clone, Copy, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum WindowBackgroundContent {
+    Opaque,
+    Transparent,
+    Blurred,
+}
+
+impl From<WindowBackgroundContent> for WindowBackgroundAppearance {
+    fn from(value: WindowBackgroundContent) -> Self {
+        match value {
+            WindowBackgroundContent::Opaque => WindowBackgroundAppearance::Opaque,
+            WindowBackgroundContent::Transparent => WindowBackgroundAppearance::Transparent,
+            WindowBackgroundContent::Blurred => WindowBackgroundAppearance::Blurred,
+        }
+    }
+}
+
 /// The content of a serialized theme family.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct ThemeFamilyContent {
@@ -53,6 +72,12 @@ pub struct ThemeContent {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
 #[serde(default)]
 pub struct ThemeStyleContent {
+    #[serde(default, rename = "background.appearance")]
+    pub window_background_appearance: Option<WindowBackgroundContent>,
+
+    #[serde(default)]
+    pub accents: Vec<AccentContent>,
+
     #[serde(flatten, default)]
     pub colors: ThemeColorsContent,
 
@@ -90,6 +115,10 @@ impl ThemeStyleContent {
                     HighlightStyle {
                         color: style
                             .color
+                            .as_ref()
+                            .and_then(|color| try_parse_color(color).ok()),
+                        background_color: style
+                            .background_color
                             .as_ref()
                             .and_then(|color| try_parse_color(color).ok()),
                         font_style: style
@@ -295,11 +324,18 @@ pub struct ThemeColorsContent {
     #[serde(rename = "pane.focused_border")]
     pub pane_focused_border: Option<String>,
 
+    #[serde(rename = "pane_group.border")]
+    pub pane_group_border: Option<String>,
+
+    /// The deprecated version of `scrollbar.thumb.background`.
+    ///
+    /// Don't use this field.
+    #[serde(rename = "scrollbar_thumb.background", skip_serializing)]
+    #[schemars(skip)]
+    pub deprecated_scrollbar_thumb_background: Option<String>,
+
     /// The color of the scrollbar thumb.
-    #[serde(
-        rename = "scrollbar.thumb.background",
-        alias = "scrollbar_thumb.background"
-    )]
+    #[serde(rename = "scrollbar.thumb.background")]
     pub scrollbar_thumb_background: Option<String>,
 
     /// The color of the scrollbar thumb when hovered over.
@@ -355,6 +391,12 @@ pub struct ThemeColorsContent {
 
     #[serde(rename = "editor.active_wrap_guide")]
     pub editor_active_wrap_guide: Option<String>,
+
+    #[serde(rename = "editor.indent_guide")]
+    pub editor_indent_guide: Option<String>,
+
+    #[serde(rename = "editor.indent_guide_active")]
+    pub editor_indent_guide_active: Option<String>,
 
     /// Read-access of a symbol, like reading a variable.
     ///
@@ -491,11 +533,12 @@ pub struct ThemeColorsContent {
 impl ThemeColorsContent {
     /// Returns a [`ThemeColorsRefinement`] based on the colors in the [`ThemeColorsContent`].
     pub fn theme_colors_refinement(&self) -> ThemeColorsRefinement {
+        let border = self
+            .border
+            .as_ref()
+            .and_then(|color| try_parse_color(color).ok());
         ThemeColorsRefinement {
-            border: self
-                .border
-                .as_ref()
-                .and_then(|color| try_parse_color(color).ok()),
+            border,
             border_variant: self
                 .border_variant
                 .as_ref()
@@ -652,10 +695,20 @@ impl ThemeColorsContent {
                 .pane_focused_border
                 .as_ref()
                 .and_then(|color| try_parse_color(color).ok()),
+            pane_group_border: self
+                .pane_group_border
+                .as_ref()
+                .and_then(|color| try_parse_color(color).ok())
+                .or(border),
             scrollbar_thumb_background: self
                 .scrollbar_thumb_background
                 .as_ref()
-                .and_then(|color| try_parse_color(color).ok()),
+                .and_then(|color| try_parse_color(color).ok())
+                .or_else(|| {
+                    self.deprecated_scrollbar_thumb_background
+                        .as_ref()
+                        .and_then(|color| try_parse_color(color).ok())
+                }),
             scrollbar_thumb_hover_background: self
                 .scrollbar_thumb_hover_background
                 .as_ref()
@@ -714,6 +767,14 @@ impl ThemeColorsContent {
                 .and_then(|color| try_parse_color(color).ok()),
             editor_active_wrap_guide: self
                 .editor_active_wrap_guide
+                .as_ref()
+                .and_then(|color| try_parse_color(color).ok()),
+            editor_indent_guide: self
+                .editor_indent_guide
+                .as_ref()
+                .and_then(|color| try_parse_color(color).ok()),
+            editor_indent_guide_active: self
+                .editor_indent_guide_active
                 .as_ref()
                 .and_then(|color| try_parse_color(color).ok()),
             editor_document_highlight_read_background: self
@@ -1166,6 +1227,9 @@ impl StatusColorsContent {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct AccentContent(pub Option<String>);
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct PlayerColorContent {
     pub cursor: Option<String>,
     pub background: Option<String>,
@@ -1254,6 +1318,9 @@ pub struct HighlightStyleContent {
     pub color: Option<String>,
 
     #[serde(deserialize_with = "treat_error_as_none")]
+    pub background_color: Option<String>,
+
+    #[serde(deserialize_with = "treat_error_as_none")]
     pub font_style: Option<FontStyleContent>,
 
     #[serde(deserialize_with = "treat_error_as_none")]
@@ -1262,7 +1329,10 @@ pub struct HighlightStyleContent {
 
 impl HighlightStyleContent {
     pub fn is_empty(&self) -> bool {
-        self.color.is_none() && self.font_style.is_none() && self.font_weight.is_none()
+        self.color.is_none()
+            && self.background_color.is_none()
+            && self.font_style.is_none()
+            && self.font_weight.is_none()
     }
 }
 

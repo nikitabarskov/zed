@@ -108,6 +108,11 @@ fn test_random_edits(mut rng: StdRng) {
         }
         assert_eq!(text.to_string(), buffer.text());
 
+        assert_eq!(
+            buffer.rope_for_version(old_buffer.version()).to_string(),
+            old_buffer.text()
+        );
+
         for _ in 0..5 {
             let end_ix = old_buffer.clip_offset(rng.gen_range(0..=old_buffer.len()), Bias::Right);
             let start_ix = old_buffer.clip_offset(rng.gen_range(0..=end_ix), Bias::Left);
@@ -133,6 +138,14 @@ fn test_random_edits(mut rng: StdRng) {
             }
             assert_eq!(old_text, new_text);
         }
+
+        assert_eq!(
+            buffer.has_edits_since(&old_buffer.version),
+            buffer
+                .edits_since::<usize>(&old_buffer.version)
+                .next()
+                .is_some(),
+        );
 
         let subscription_edits = subscription.consume();
         log::info!(

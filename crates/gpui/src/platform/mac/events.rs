@@ -1,12 +1,12 @@
 use crate::{
-    point, px, KeyDownEvent, KeyUpEvent, Keystroke, Modifiers, ModifiersChangedEvent, MouseButton,
-    MouseDownEvent, MouseExitEvent, MouseMoveEvent, MouseUpEvent, NavigationDirection, Pixels,
-    PlatformInput, ScrollDelta, ScrollWheelEvent, TouchPhase,
+    platform::mac::NSStringExt, point, px, KeyDownEvent, KeyUpEvent, Keystroke, Modifiers,
+    ModifiersChangedEvent, MouseButton, MouseDownEvent, MouseExitEvent, MouseMoveEvent,
+    MouseUpEvent, NavigationDirection, Pixels, PlatformInput, ScrollDelta, ScrollWheelEvent,
+    TouchPhase,
 };
 use cocoa::{
     appkit::{NSEvent, NSEventModifierFlags, NSEventPhase, NSEventType},
     base::{id, YES},
-    foundation::NSString as _,
 };
 use core_graphics::{
     event::{CGEvent, CGEventFlags, CGKeyCode},
@@ -15,7 +15,7 @@ use core_graphics::{
 use ctor::ctor;
 use metal::foreign_types::ForeignType as _;
 use objc::{class, msg_send, sel, sel_impl};
-use std::{borrow::Cow, ffi::CStr, mem, os::raw::c_char, ptr};
+use std::{borrow::Cow, mem, ptr};
 
 const BACKSPACE_KEY: u16 = 0x7f;
 const SPACE_KEY: u16 = b' ' as u16;
@@ -77,7 +77,7 @@ unsafe fn read_modifiers(native_event: id) -> Modifiers {
         control,
         alt,
         shift,
-        command,
+        platform: command,
         function,
     }
 }
@@ -131,6 +131,7 @@ impl PlatformInput {
                         ),
                         modifiers: read_modifiers(native_event),
                         click_count: native_event.clickCount() as usize,
+                        first_mouse: false,
                     })
                 })
             }
@@ -242,11 +243,10 @@ impl PlatformInput {
 unsafe fn parse_keystroke(native_event: id) -> Keystroke {
     use cocoa::appkit::*;
 
-    let mut chars_ignoring_modifiers =
-        CStr::from_ptr(native_event.charactersIgnoringModifiers().UTF8String() as *mut c_char)
-            .to_str()
-            .unwrap()
-            .to_string();
+    let mut chars_ignoring_modifiers = native_event
+        .charactersIgnoringModifiers()
+        .to_str()
+        .to_string();
     let first_char = chars_ignoring_modifiers.chars().next().map(|ch| ch as u16);
     let modifiers = native_event.modifierFlags();
 
@@ -322,7 +322,7 @@ unsafe fn parse_keystroke(native_event: id) -> Keystroke {
             control,
             alt,
             shift,
-            command,
+            platform: command,
             function,
         },
         key,
@@ -350,9 +350,6 @@ fn chars_for_modified_key(code: CGKeyCode, cmd: bool, shift: bool) -> String {
 
     unsafe {
         let event: id = msg_send![class!(NSEvent), eventWithCGEvent: &*event];
-        CStr::from_ptr(event.characters().UTF8String())
-            .to_str()
-            .unwrap()
-            .to_string()
+        event.characters().to_str().to_string()
     }
 }

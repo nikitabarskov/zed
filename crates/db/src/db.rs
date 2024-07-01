@@ -7,10 +7,10 @@ use anyhow::Context;
 use gpui::AppContext;
 pub use indoc::indoc;
 pub use lazy_static;
+pub use paths::database_dir;
 pub use smol;
 pub use sqlez;
 pub use sqlez_macros;
-pub use util::paths::DB_DIR;
 
 use release_channel::ReleaseChannel;
 pub use release_channel::RELEASE_CHANNEL;
@@ -20,7 +20,7 @@ use sqlez_macros::sql;
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use util::{async_maybe, ResultExt};
+use util::{maybe, ResultExt};
 
 const CONNECTION_INITIALIZE_QUERY: &str = sql!(
     PRAGMA foreign_keys=TRUE;
@@ -57,7 +57,7 @@ pub async fn open_db<M: Migrator + 'static>(
     let release_channel_name = release_channel.dev_name();
     let main_db_dir = db_dir.join(Path::new(&format!("0-{}", release_channel_name)));
 
-    let connection = async_maybe!({
+    let connection = maybe!(async {
         smol::fs::create_dir_all(&main_db_dir)
             .await
             .context("Could not create db directory")
@@ -145,7 +145,7 @@ macro_rules! define_connection {
 
         #[cfg(not(any(test, feature = "test-support")))]
         $crate::lazy_static::lazy_static! {
-            pub static ref $id: $t = $t($crate::smol::block_on($crate::open_db(&$crate::DB_DIR, &$crate::RELEASE_CHANNEL)));
+            pub static ref $id: $t = $t($crate::smol::block_on($crate::open_db($crate::database_dir(), &$crate::RELEASE_CHANNEL)));
         }
     };
     (pub static ref $id:ident: $t:ident<$($d:ty),+> = $migrations:expr;) => {
@@ -176,7 +176,7 @@ macro_rules! define_connection {
 
         #[cfg(not(any(test, feature = "test-support")))]
         $crate::lazy_static::lazy_static! {
-            pub static ref $id: $t = $t($crate::smol::block_on($crate::open_db(&$crate::DB_DIR, &$crate::RELEASE_CHANNEL)));
+            pub static ref $id: $t = $t($crate::smol::block_on($crate::open_db($crate::database_dir(), &$crate::RELEASE_CHANNEL)));
         }
     };
 }

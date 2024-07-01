@@ -1,7 +1,5 @@
-use crate::{
-    db::{ExtensionMetadata, NewExtensionVersion},
-    AppState, Error, Result,
-};
+use crate::db::ExtensionVersionConstraints;
+use crate::{db::NewExtensionVersion, AppState, Error, Result};
 use anyhow::{anyhow, Context as _};
 use aws_sdk_s3::presigning::PresigningConfig;
 use axum::{
@@ -12,14 +10,18 @@ use axum::{
     Extension, Json, Router,
 };
 use collections::HashMap;
-use serde::{Deserialize, Serialize};
+use rpc::{ExtensionApiManifest, GetExtensionsResponse};
+use semantic_version::SemanticVersion;
+use serde::Deserialize;
 use std::{sync::Arc, time::Duration};
 use time::PrimitiveDateTime;
-use util::ResultExt;
+use util::{maybe, ResultExt};
 
 pub fn router() -> Router {
     Router::new()
         .route("/extensions", get(get_extensions))
+        .route("/extensions/updates", get(get_extension_updates))
+        .route("/extensions/:extension_id", get(get_extension_versions))
         .route(
             "/extensions/:extension_id/download",
             get(download_latest_extension),
@@ -33,58 +35,125 @@ pub fn router() -> Router {
 #[derive(Debug, Deserialize)]
 struct GetExtensionsParams {
     filter: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-struct DownloadLatestExtensionParams {
-    extension_id: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct DownloadExtensionParams {
-    extension_id: String,
-    version: String,
-}
-
-#[derive(Debug, Serialize)]
-struct GetExtensionsResponse {
-    pub data: Vec<ExtensionMetadata>,
-}
-
-#[derive(Deserialize)]
-struct ExtensionManifest {
-    name: String,
-    version: String,
-    description: Option<String>,
-    authors: Vec<String>,
-    repository: String,
+    #[serde(default)]
+    ids: Option<String>,
+    #[serde(default)]
+    max_schema_version: i32,
 }
 
 async fn get_extensions(
     Extension(app): Extension<Arc<AppState>>,
     Query(params): Query<GetExtensionsParams>,
 ) -> Result<Json<GetExtensionsResponse>> {
-    let extensions = app.db.get_extensions(params.filter.as_deref(), 500).await?;
+    let extension_ids = params
+        .ids
+        .as_ref()
+        .map(|s| s.split(',').map(|s| s.trim()).collect::<Vec<_>>());
+
+    let extensions = if let Some(extension_ids) = extension_ids {
+        app.db.get_extensions_by_ids(&extension_ids, None).await?
+    } else {
+        app.db
+            .get_extensions(params.filter.as_deref(), params.max_schema_version, 500)
+            .await?
+    };
+
     Ok(Json(GetExtensionsResponse { data: extensions }))
+}
+
+#[derive(Debug, Deserialize)]
+struct GetExtensionUpdatesParams {
+    ids: String,
+    min_schema_version: i32,
+    max_schema_version: i32,
+    min_wasm_api_version: SemanticVersion,
+    max_wasm_api_version: SemanticVersion,
+}
+
+async fn get_extension_updates(
+    Extension(app): Extension<Arc<AppState>>,
+    Query(params): Query<GetExtensionUpdatesParams>,
+) -> Result<Json<GetExtensionsResponse>> {
+    let constraints = ExtensionVersionConstraints {
+        schema_versions: params.min_schema_version..=params.max_schema_version,
+        wasm_api_versions: params.min_wasm_api_version..=params.max_wasm_api_version,
+    };
+
+    let extension_ids = params.ids.split(',').map(|s| s.trim()).collect::<Vec<_>>();
+
+    let extensions = app
+        .db
+        .get_extensions_by_ids(&extension_ids, Some(&constraints))
+        .await?;
+
+    Ok(Json(GetExtensionsResponse { data: extensions }))
+}
+
+#[derive(Debug, Deserialize)]
+struct GetExtensionVersionsParams {
+    extension_id: String,
+}
+
+async fn get_extension_versions(
+    Extension(app): Extension<Arc<AppState>>,
+    Path(params): Path<GetExtensionVersionsParams>,
+) -> Result<Json<GetExtensionsResponse>> {
+    let extension_versions = app.db.get_extension_versions(&params.extension_id).await?;
+
+    Ok(Json(GetExtensionsResponse {
+        data: extension_versions,
+    }))
+}
+
+#[derive(Debug, Deserialize)]
+struct DownloadLatestExtensionPathParams {
+    extension_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct DownloadLatestExtensionQueryParams {
+    min_schema_version: Option<i32>,
+    max_schema_version: Option<i32>,
+    min_wasm_api_version: Option<SemanticVersion>,
+    max_wasm_api_version: Option<SemanticVersion>,
 }
 
 async fn download_latest_extension(
     Extension(app): Extension<Arc<AppState>>,
-    Path(params): Path<DownloadLatestExtensionParams>,
+    Path(params): Path<DownloadLatestExtensionPathParams>,
+    Query(query): Query<DownloadLatestExtensionQueryParams>,
 ) -> Result<Redirect> {
+    let constraints = maybe!({
+        let min_schema_version = query.min_schema_version?;
+        let max_schema_version = query.max_schema_version?;
+        let min_wasm_api_version = query.min_wasm_api_version?;
+        let max_wasm_api_version = query.max_wasm_api_version?;
+
+        Some(ExtensionVersionConstraints {
+            schema_versions: min_schema_version..=max_schema_version,
+            wasm_api_versions: min_wasm_api_version..=max_wasm_api_version,
+        })
+    });
+
     let extension = app
         .db
-        .get_extension(&params.extension_id)
+        .get_extension(&params.extension_id, constraints.as_ref())
         .await?
         .ok_or_else(|| anyhow!("unknown extension"))?;
     download_extension(
         Extension(app),
         Path(DownloadExtensionParams {
             extension_id: params.extension_id,
-            version: extension.version,
+            version: extension.manifest.version.to_string(),
         }),
     )
     .await
+}
+
+#[derive(Debug, Deserialize)]
+struct DownloadExtensionParams {
+    extension_id: String,
+    version: String,
 }
 
 async fn download_extension(
@@ -170,61 +239,74 @@ async fn fetch_extensions_from_blob_store(
 ) -> anyhow::Result<()> {
     log::info!("fetching extensions from blob store");
 
-    let list = blob_store_client
-        .list_objects()
-        .bucket(blob_store_bucket)
-        .prefix("extensions/")
-        .send()
-        .await?;
+    let mut next_marker = None;
+    let mut published_versions = HashMap::<String, Vec<String>>::default();
 
-    let objects = list.contents.unwrap_or_default();
+    loop {
+        let list = blob_store_client
+            .list_objects()
+            .bucket(blob_store_bucket)
+            .prefix("extensions/")
+            .set_marker(next_marker.clone())
+            .send()
+            .await?;
+        let objects = list.contents.unwrap_or_default();
+        log::info!("fetched {} object(s) from blob store", objects.len());
 
-    let mut published_versions = HashMap::<&str, Vec<&str>>::default();
-    for object in &objects {
-        let Some(key) = object.key.as_ref() else {
-            continue;
-        };
-        let mut parts = key.split('/');
-        let Some(_) = parts.next().filter(|part| *part == "extensions") else {
-            continue;
-        };
-        let Some(extension_id) = parts.next() else {
-            continue;
-        };
-        let Some(version) = parts.next() else {
-            continue;
-        };
-        if parts.next() == Some("manifest.json") {
-            published_versions
-                .entry(extension_id)
-                .or_default()
-                .push(version);
+        for object in &objects {
+            let Some(key) = object.key.as_ref() else {
+                continue;
+            };
+            let mut parts = key.split('/');
+            let Some(_) = parts.next().filter(|part| *part == "extensions") else {
+                continue;
+            };
+            let Some(extension_id) = parts.next() else {
+                continue;
+            };
+            let Some(version) = parts.next() else {
+                continue;
+            };
+            if parts.next() == Some("manifest.json") {
+                published_versions
+                    .entry(extension_id.to_owned())
+                    .or_default()
+                    .push(version.to_owned());
+            }
+        }
+
+        if let (Some(true), Some(last_object)) = (list.is_truncated, objects.last()) {
+            next_marker.clone_from(&last_object.key);
+        } else {
+            break;
         }
     }
+
+    log::info!("found {} published extensions", published_versions.len());
 
     let known_versions = app_state.db.get_known_extension_versions().await?;
 
     let mut new_versions = HashMap::<&str, Vec<NewExtensionVersion>>::default();
     let empty = Vec::new();
-    for (extension_id, published_versions) in published_versions {
+    for (extension_id, published_versions) in &published_versions {
         let known_versions = known_versions.get(extension_id).unwrap_or(&empty);
 
         for published_version in published_versions {
             if known_versions
-                .binary_search_by_key(&published_version, String::as_str)
+                .binary_search_by_key(&published_version, |known_version| known_version)
                 .is_err()
             {
                 if let Some(extension) = fetch_extension_manifest(
                     blob_store_client,
                     blob_store_bucket,
-                    extension_id,
-                    published_version,
+                    &extension_id,
+                    &published_version,
                 )
                 .await
                 .log_err()
                 {
                     new_versions
-                        .entry(extension_id)
+                        .entry(&extension_id)
                         .or_default()
                         .push(extension);
                 }
@@ -267,7 +349,7 @@ async fn fetch_extension_manifest(
         })?
         .to_vec();
     let manifest =
-        serde_json::from_slice::<ExtensionManifest>(&manifest_bytes).with_context(|| {
+        serde_json::from_slice::<ExtensionApiManifest>(&manifest_bytes).with_context(|| {
             format!(
                 "invalid manifest for extension {extension_id} version {version}: {}",
                 String::from_utf8_lossy(&manifest_bytes)
@@ -287,6 +369,8 @@ async fn fetch_extension_manifest(
         description: manifest.description.unwrap_or_default(),
         authors: manifest.authors,
         repository: manifest.repository,
+        schema_version: manifest.schema_version.unwrap_or(0),
+        wasm_api_version: manifest.wasm_api_version,
         published_at,
     })
 }

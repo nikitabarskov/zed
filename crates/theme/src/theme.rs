@@ -27,7 +27,9 @@ pub use schema::*;
 pub use settings::*;
 pub use styles::*;
 
-use gpui::{AppContext, AssetSource, Hsla, SharedString, WindowAppearance};
+use gpui::{
+    AppContext, AssetSource, Hsla, SharedString, WindowAppearance, WindowBackgroundAppearance,
+};
 use serde::Deserialize;
 
 #[derive(Debug, PartialEq, Clone, Copy, Deserialize)]
@@ -82,7 +84,7 @@ pub fn init(themes_to_load: LoadThemes, cx: &mut AppContext) {
         let buffer_font_size = ThemeSettings::get_global(cx).buffer_font_size;
         if buffer_font_size != prev_buffer_font_size {
             prev_buffer_font_size = buffer_font_size;
-            reset_font_size(cx);
+            reset_buffer_font_size(cx);
         }
     })
     .detach();
@@ -123,6 +125,12 @@ impl Theme {
         &self.styles.system
     }
 
+    /// Returns the [`AccentColors`] for the theme.
+    #[inline(always)]
+    pub fn accents(&self) -> &AccentColors {
+        &self.styles.accents
+    }
+
     /// Returns the [`PlayerColors`] for the theme.
     #[inline(always)]
     pub fn players(&self) -> &PlayerColors {
@@ -157,6 +165,12 @@ impl Theme {
     #[inline(always)]
     pub fn appearance(&self) -> Appearance {
         self.appearance
+    }
+
+    /// Returns the [`WindowBackgroundAppearance`] for the theme.
+    #[inline(always)]
+    pub fn window_background_appearance(&self) -> WindowBackgroundAppearance {
+        self.styles.window_background_appearance
     }
 }
 

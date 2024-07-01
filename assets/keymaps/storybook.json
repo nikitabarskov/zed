@@ -13,11 +13,15 @@
       "cmd-up": "menu::SelectFirst",
       "cmd-down": "menu::SelectLast",
       "enter": "menu::Confirm",
-      "ctrl-enter": "menu::ShowContextMenu",
+      "ctrl-enter": "menu::SecondaryConfirm",
       "cmd-enter": "menu::SecondaryConfirm",
       "escape": "menu::Cancel",
       "ctrl-c": "menu::Cancel",
-      "cmd-q": "storybook::Quit"
+      "cmd-q": "storybook::Quit",
+      "backspace": "editor::Backspace",
+      "delete": "editor::Delete",
+      "left": "editor::MoveLeft",
+      "right": "editor::MoveRight"
     }
   }
 ]

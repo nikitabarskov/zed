@@ -69,6 +69,7 @@ mod action;
 mod app;
 
 mod arena;
+mod asset_cache;
 mod assets;
 mod bounds_tree;
 mod color;
@@ -76,7 +77,7 @@ mod element;
 mod elements;
 mod executor;
 mod geometry;
-mod image_cache;
+mod global;
 mod input;
 mod interactive;
 mod key_dispatch;
@@ -117,6 +118,7 @@ pub use action::*;
 pub use anyhow::Result;
 pub use app::*;
 pub(crate) use arena::*;
+pub use asset_cache::*;
 pub use assets::*;
 pub use color::*;
 pub use ctor::ctor;
@@ -124,8 +126,8 @@ pub use element::*;
 pub use elements::*;
 pub use executor::*;
 pub use geometry::*;
+pub use global::*;
 pub use gpui_macros::{register_action, test, IntoElement, Render};
-pub use image_cache::*;
 pub use input::*;
 pub use interactive::*;
 use key_dispatch::*;
@@ -165,6 +167,19 @@ pub trait Context {
         build_model: impl FnOnce(&mut ModelContext<'_, T>) -> T,
     ) -> Self::Result<Model<T>>;
 
+    /// Reserve a slot for a model to be inserted later.
+    /// The returned [Reservation] allows you to obtain the [EntityId] for the future model.
+    fn reserve_model<T: 'static>(&mut self) -> Self::Result<Reservation<T>>;
+
+    /// Insert a new model in the app context based on a [Reservation] previously obtained from [`reserve_model`].
+    ///
+    /// [`reserve_model`]: Self::reserve_model
+    fn insert_model<T: 'static>(
+        &mut self,
+        reservation: Reservation<T>,
+        build_model: impl FnOnce(&mut ModelContext<'_, T>) -> T,
+    ) -> Self::Result<Model<T>>;
+
     /// Update a model in the app context.
     fn update_model<T, R>(
         &mut self,
@@ -196,6 +211,17 @@ pub trait Context {
     ) -> Result<R>
     where
         T: 'static;
+}
+
+/// Returned by [Context::reserve_model] to later be passed to [Context::insert_model].
+/// Allows you to obtain the [EntityId] for a model before it is created.
+pub struct Reservation<T>(pub(crate) Slot<T>);
+
+impl<T: 'static> Reservation<T> {
+    /// Returns the [EntityId] that will be associated with the model once it is inserted.
+    pub fn entity_id(&self) -> EntityId {
+        self.0.entity_id()
+    }
 }
 
 /// This trait is used for the different visual contexts in GPUI that
@@ -261,6 +287,10 @@ pub trait EventEmitter<E: Any>: 'static {}
 pub trait BorrowAppContext {
     /// Set a global value on the context.
     fn set_global<T: Global>(&mut self, global: T);
+    /// Updates the global state of the given type.
+    fn update_global<G, R>(&mut self, f: impl FnOnce(&mut G, &mut Self) -> R) -> R
+    where
+        G: Global;
 }
 
 impl<C> BorrowAppContext for C
@@ -269,6 +299,16 @@ where
 {
     fn set_global<G: Global>(&mut self, global: G) {
         self.borrow_mut().set_global(global)
+    }
+
+    fn update_global<G, R>(&mut self, f: impl FnOnce(&mut G, &mut Self) -> R) -> R
+    where
+        G: Global,
+    {
+        let mut global = self.borrow_mut().lease_global::<G>();
+        let result = f(&mut global, self);
+        self.borrow_mut().end_global_lease(global);
+        result
     }
 }
 
@@ -289,8 +329,3 @@ impl<T> Flatten<T> for Result<T> {
         self
     }
 }
-
-/// A marker trait for types that can be stored in GPUI's global state.
-///
-/// Implement this on types you want to store in the context as a global.
-pub trait Global: 'static {}

@@ -1,4 +1,6 @@
-use crate::{AnyElement, Bounds, Element, ElementContext, IntoElement, LayoutId, Pixels};
+use crate::{
+    AnyElement, Bounds, Element, GlobalElementId, IntoElement, LayoutId, Pixels, WindowContext,
+};
 
 /// Builds a `Deferred` element, which delays the layout and paint of its child.
 pub fn deferred(child: impl IntoElement) -> Deferred {
@@ -15,20 +17,39 @@ pub struct Deferred {
     priority: usize,
 }
 
-impl Element for Deferred {
-    type BeforeLayout = ();
-    type AfterLayout = ();
+impl Deferred {
+    /// Sets the `priority` value of the `deferred` element, which
+    /// determines the drawing order relative to other deferred elements,
+    /// with higher values being drawn on top.
+    pub fn with_priority(mut self, priority: usize) -> Self {
+        self.priority = priority;
+        self
+    }
+}
 
-    fn before_layout(&mut self, cx: &mut ElementContext) -> (LayoutId, ()) {
-        let layout_id = self.child.as_mut().unwrap().before_layout(cx);
+impl Element for Deferred {
+    type RequestLayoutState = ();
+    type PrepaintState = ();
+
+    fn id(&self) -> Option<crate::ElementId> {
+        None
+    }
+
+    fn request_layout(
+        &mut self,
+        _id: Option<&GlobalElementId>,
+        cx: &mut WindowContext,
+    ) -> (LayoutId, ()) {
+        let layout_id = self.child.as_mut().unwrap().request_layout(cx);
         (layout_id, ())
     }
 
-    fn after_layout(
+    fn prepaint(
         &mut self,
+        _id: Option<&GlobalElementId>,
         _bounds: Bounds<Pixels>,
-        _before_layout: &mut Self::BeforeLayout,
-        cx: &mut ElementContext,
+        _request_layout: &mut Self::RequestLayoutState,
+        cx: &mut WindowContext,
     ) {
         let child = self.child.take().unwrap();
         let element_offset = cx.element_offset();
@@ -37,10 +58,11 @@ impl Element for Deferred {
 
     fn paint(
         &mut self,
+        _id: Option<&GlobalElementId>,
         _bounds: Bounds<Pixels>,
-        _before_layout: &mut Self::BeforeLayout,
-        _after_layout: &mut Self::AfterLayout,
-        _cx: &mut ElementContext,
+        _request_layout: &mut Self::RequestLayoutState,
+        _prepaint: &mut Self::PrepaintState,
+        _cx: &mut WindowContext,
     ) {
     }
 }

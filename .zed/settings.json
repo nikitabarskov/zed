@@ -15,7 +15,20 @@
     "JSON": {
       "tab_size": 2,
       "formatter": "prettier"
+    },
+    "JavaScript": {
+      "tab_size": 2,
+      "formatter": "prettier"
+    },
+    "Rust": {
+      "tasks": {
+        "variables": {
+          "RUST_DEFAULT_PACKAGE_RUN": "zed"
+        }
+      }
     }
   },
-  "formatter": "auto"
+  "formatter": "auto",
+  "remove_trailing_whitespace_on_save": true,
+  "ensure_final_newline_on_save": true
 }

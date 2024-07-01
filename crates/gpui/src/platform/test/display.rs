@@ -1,12 +1,11 @@
+use crate::{px, Bounds, DisplayId, Pixels, PlatformDisplay, Point};
 use anyhow::{Ok, Result};
-
-use crate::{Bounds, DisplayId, GlobalPixels, PlatformDisplay, Point};
 
 #[derive(Debug)]
 pub(crate) struct TestDisplay {
     id: DisplayId,
     uuid: uuid::Uuid,
-    bounds: Bounds<GlobalPixels>,
+    bounds: Bounds<Pixels>,
 }
 
 impl TestDisplay {
@@ -14,10 +13,7 @@ impl TestDisplay {
         TestDisplay {
             id: DisplayId(1),
             uuid: uuid::Uuid::new_v4(),
-            bounds: Bounds::from_corners(
-                Point::default(),
-                Point::new(GlobalPixels(1920.), GlobalPixels(1080.)),
-            ),
+            bounds: Bounds::from_corners(Point::default(), Point::new(px(1920.), px(1080.))),
         }
     }
 }
@@ -31,7 +27,7 @@ impl PlatformDisplay for TestDisplay {
         Ok(self.uuid)
     }
 
-    fn bounds(&self) -> crate::Bounds<crate::GlobalPixels> {
+    fn bounds(&self) -> crate::Bounds<crate::Pixels> {
         self.bounds
     }
 }

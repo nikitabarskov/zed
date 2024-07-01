@@ -11,7 +11,7 @@ use std::{
     pin::Pin,
     sync::Arc,
     task::{Context, Poll},
-    time::Duration,
+    time::{Duration, Instant},
 };
 use util::post_inc;
 
@@ -32,10 +32,12 @@ struct TestDispatcherState {
     background: Vec<Runnable>,
     deprioritized_background: Vec<Runnable>,
     delayed: Vec<(Duration, Runnable)>,
+    start_time: Instant,
     time: Duration,
     is_main_thread: bool,
     next_id: TestDispatcherId,
     allow_parking: bool,
+    waiting_hint: Option<String>,
     waiting_backtrace: Option<Backtrace>,
     deprioritized_task_labels: HashSet<TaskLabel>,
     block_on_ticks: RangeInclusive<usize>,
@@ -51,9 +53,11 @@ impl TestDispatcher {
             deprioritized_background: Vec::new(),
             delayed: Vec::new(),
             time: Duration::ZERO,
+            start_time: Instant::now(),
             is_main_thread: true,
             next_id: TestDispatcherId(1),
             allow_parking: false,
+            waiting_hint: None,
             waiting_backtrace: None,
             deprioritized_task_labels: Default::default(),
             block_on_ticks: 0..=1000,
@@ -109,110 +113,7 @@ impl TestDispatcher {
         }
     }
 
-    pub fn deprioritize(&self, task_label: TaskLabel) {
-        self.state
-            .lock()
-            .deprioritized_task_labels
-            .insert(task_label);
-    }
-
-    pub fn run_until_parked(&self) {
-        while self.tick(false) {}
-    }
-
-    pub fn parking_allowed(&self) -> bool {
-        self.state.lock().allow_parking
-    }
-
-    pub fn allow_parking(&self) {
-        self.state.lock().allow_parking = true
-    }
-
-    pub fn forbid_parking(&self) {
-        self.state.lock().allow_parking = false
-    }
-
-    pub fn start_waiting(&self) {
-        self.state.lock().waiting_backtrace = Some(Backtrace::new_unresolved());
-    }
-
-    pub fn finish_waiting(&self) {
-        self.state.lock().waiting_backtrace.take();
-    }
-
-    pub fn waiting_backtrace(&self) -> Option<Backtrace> {
-        self.state.lock().waiting_backtrace.take().map(|mut b| {
-            b.resolve();
-            b
-        })
-    }
-
-    pub fn rng(&self) -> StdRng {
-        self.state.lock().random.clone()
-    }
-
-    pub fn set_block_on_ticks(&self, range: std::ops::RangeInclusive<usize>) {
-        self.state.lock().block_on_ticks = range;
-    }
-
-    pub fn gen_block_on_ticks(&self) -> usize {
-        let mut lock = self.state.lock();
-        let block_on_ticks = lock.block_on_ticks.clone();
-        lock.random.gen_range(block_on_ticks)
-    }
-}
-
-impl Clone for TestDispatcher {
-    fn clone(&self) -> Self {
-        let id = post_inc(&mut self.state.lock().next_id.0);
-        Self {
-            id: TestDispatcherId(id),
-            state: self.state.clone(),
-            parker: self.parker.clone(),
-            unparker: self.unparker.clone(),
-        }
-    }
-}
-
-impl PlatformDispatcher for TestDispatcher {
-    fn is_main_thread(&self) -> bool {
-        self.state.lock().is_main_thread
-    }
-
-    fn dispatch(&self, runnable: Runnable, label: Option<TaskLabel>) {
-        {
-            let mut state = self.state.lock();
-            if label.map_or(false, |label| {
-                state.deprioritized_task_labels.contains(&label)
-            }) {
-                state.deprioritized_background.push(runnable);
-            } else {
-                state.background.push(runnable);
-            }
-        }
-        self.unparker.unpark();
-    }
-
-    fn dispatch_on_main_thread(&self, runnable: Runnable) {
-        self.state
-            .lock()
-            .foreground
-            .entry(self.id)
-            .or_default()
-            .push_back(runnable);
-        self.unparker.unpark();
-    }
-
-    fn dispatch_after(&self, duration: std::time::Duration, runnable: Runnable) {
-        let mut state = self.state.lock();
-        let next_time = state.time + duration;
-        let ix = match state.delayed.binary_search_by_key(&next_time, |e| e.0) {
-            Ok(ix) | Err(ix) => ix,
-        };
-        state.delayed.insert(ix, (next_time, runnable));
-    }
-
-    fn tick(&self, background_only: bool) -> bool {
+    pub fn tick(&self, background_only: bool) -> bool {
         let mut state = self.state.lock();
 
         while let Some((deadline, _)) = state.delayed.first() {
@@ -274,8 +175,124 @@ impl PlatformDispatcher for TestDispatcher {
         true
     }
 
-    fn park(&self) {
+    pub fn deprioritize(&self, task_label: TaskLabel) {
+        self.state
+            .lock()
+            .deprioritized_task_labels
+            .insert(task_label);
+    }
+
+    pub fn run_until_parked(&self) {
+        while self.tick(false) {}
+    }
+
+    pub fn parking_allowed(&self) -> bool {
+        self.state.lock().allow_parking
+    }
+
+    pub fn allow_parking(&self) {
+        self.state.lock().allow_parking = true
+    }
+
+    pub fn forbid_parking(&self) {
+        self.state.lock().allow_parking = false
+    }
+
+    pub fn set_waiting_hint(&self, msg: Option<String>) {
+        self.state.lock().waiting_hint = msg
+    }
+
+    pub fn waiting_hint(&self) -> Option<String> {
+        self.state.lock().waiting_hint.clone()
+    }
+
+    pub fn start_waiting(&self) {
+        self.state.lock().waiting_backtrace = Some(Backtrace::new_unresolved());
+    }
+
+    pub fn finish_waiting(&self) {
+        self.state.lock().waiting_backtrace.take();
+    }
+
+    pub fn waiting_backtrace(&self) -> Option<Backtrace> {
+        self.state.lock().waiting_backtrace.take().map(|mut b| {
+            b.resolve();
+            b
+        })
+    }
+
+    pub fn rng(&self) -> StdRng {
+        self.state.lock().random.clone()
+    }
+
+    pub fn set_block_on_ticks(&self, range: std::ops::RangeInclusive<usize>) {
+        self.state.lock().block_on_ticks = range;
+    }
+
+    pub fn gen_block_on_ticks(&self) -> usize {
+        let mut lock = self.state.lock();
+        let block_on_ticks = lock.block_on_ticks.clone();
+        lock.random.gen_range(block_on_ticks)
+    }
+}
+
+impl Clone for TestDispatcher {
+    fn clone(&self) -> Self {
+        let id = post_inc(&mut self.state.lock().next_id.0);
+        Self {
+            id: TestDispatcherId(id),
+            state: self.state.clone(),
+            parker: self.parker.clone(),
+            unparker: self.unparker.clone(),
+        }
+    }
+}
+
+impl PlatformDispatcher for TestDispatcher {
+    fn is_main_thread(&self) -> bool {
+        self.state.lock().is_main_thread
+    }
+
+    fn now(&self) -> Instant {
+        let state = self.state.lock();
+        state.start_time + state.time
+    }
+
+    fn dispatch(&self, runnable: Runnable, label: Option<TaskLabel>) {
+        {
+            let mut state = self.state.lock();
+            if label.map_or(false, |label| {
+                state.deprioritized_task_labels.contains(&label)
+            }) {
+                state.deprioritized_background.push(runnable);
+            } else {
+                state.background.push(runnable);
+            }
+        }
+        self.unparker.unpark();
+    }
+
+    fn dispatch_on_main_thread(&self, runnable: Runnable) {
+        self.state
+            .lock()
+            .foreground
+            .entry(self.id)
+            .or_default()
+            .push_back(runnable);
+        self.unparker.unpark();
+    }
+
+    fn dispatch_after(&self, duration: std::time::Duration, runnable: Runnable) {
+        let mut state = self.state.lock();
+        let next_time = state.time + duration;
+        let ix = match state.delayed.binary_search_by_key(&next_time, |e| e.0) {
+            Ok(ix) | Err(ix) => ix,
+        };
+        state.delayed.insert(ix, (next_time, runnable));
+    }
+    fn park(&self, _: Option<std::time::Duration>) -> bool {
         self.parker.lock().park();
+        true
     }
 
     fn unparker(&self) -> Unparker {

@@ -22,14 +22,17 @@ mod text_system;
 mod window;
 mod window_appearance;
 
-use crate::{px, size, GlobalPixels, Pixels, Size};
+use crate::{px, size, DevicePixels, Pixels, Size};
 use cocoa::{
     base::{id, nil},
     foundation::{NSAutoreleasePool, NSNotFound, NSRect, NSSize, NSString, NSUInteger},
 };
 
 use objc::runtime::{BOOL, NO, YES};
-use std::ops::Range;
+use std::{
+    ffi::{c_char, CStr},
+    ops::Range,
+};
 
 pub(crate) use dispatcher::*;
 pub(crate) use display::*;
@@ -48,6 +51,21 @@ impl BoolExt for bool {
             YES
         } else {
             NO
+        }
+    }
+}
+
+trait NSStringExt {
+    unsafe fn to_str(&self) -> &str;
+}
+
+impl NSStringExt for id {
+    unsafe fn to_str(&self) -> &str {
+        let cstr = self.UTF8String();
+        if cstr.is_null() {
+            ""
+        } else {
+            CStr::from_ptr(cstr as *mut c_char).to_str().unwrap()
         }
     }
 }
@@ -122,9 +140,9 @@ impl From<NSRect> for Size<Pixels> {
     }
 }
 
-impl From<NSRect> for Size<GlobalPixels> {
+impl From<NSRect> for Size<DevicePixels> {
     fn from(rect: NSRect) -> Self {
         let NSSize { width, height } = rect.size;
-        size(width.into(), height.into())
+        size(DevicePixels(width as i32), DevicePixels(height as i32))
     }
 }

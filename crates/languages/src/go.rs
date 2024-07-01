@@ -1,15 +1,19 @@
 use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
 use futures::StreamExt;
-use gpui::{AsyncAppContext, Task};
+use gpui::{AppContext, AsyncAppContext, Task};
+use http::github::latest_github_release;
 pub use language::*;
 use lazy_static::lazy_static;
 use lsp::LanguageServerBinary;
+use project::project_settings::{BinarySettings, ProjectSettings};
 use regex::Regex;
 use serde_json::json;
+use settings::Settings;
 use smol::{fs, process};
 use std::{
     any::Any,
+    borrow::Cow,
     ffi::{OsStr, OsString},
     ops::Range,
     path::PathBuf,
@@ -19,7 +23,8 @@ use std::{
         Arc,
     },
 };
-use util::{async_maybe, fs::remove_matching, github::latest_github_release, ResultExt};
+use task::{TaskTemplate, TaskTemplates, TaskVariables, VariableName};
+use util::{fs::remove_matching, maybe, ResultExt};
 
 fn server_binary_arguments() -> Vec<OsString> {
     vec!["-mode=stdio".into()]
@@ -28,14 +33,21 @@ fn server_binary_arguments() -> Vec<OsString> {
 #[derive(Copy, Clone)]
 pub struct GoLspAdapter;
 
+impl GoLspAdapter {
+    const SERVER_NAME: &'static str = "gopls";
+}
+
 lazy_static! {
     static ref GOPLS_VERSION_REGEX: Regex = Regex::new(r"\d+\.\d+\.\d+").unwrap();
+    static ref GO_EXTRACT_SUBTEST_NAME_REGEX: Regex =
+        Regex::new(r#".*t\.Run\("([^"]*)".*"#).unwrap();
+    static ref GO_ESCAPE_SUBTEST_NAME_REGEX: Regex = Regex::new(r#"[.*+?^${}()|\[\]\\]"#).unwrap();
 }
 
 #[async_trait(?Send)]
 impl super::LspAdapter for GoLspAdapter {
     fn name(&self) -> LanguageServerName {
-        LanguageServerName("gopls".into())
+        LanguageServerName(Self::SERVER_NAME.into())
     }
 
     async fn fetch_latest_server_version(
@@ -57,15 +69,43 @@ impl super::LspAdapter for GoLspAdapter {
     async fn check_if_user_installed(
         &self,
         delegate: &dyn LspAdapterDelegate,
-        _: &AsyncAppContext,
+        cx: &AsyncAppContext,
     ) -> Option<LanguageServerBinary> {
-        let env = delegate.shell_env().await;
-        let path = delegate.which("gopls".as_ref()).await?;
-        Some(LanguageServerBinary {
-            path,
-            arguments: server_binary_arguments(),
-            env: Some(env),
-        })
+        let configured_binary = cx.update(|cx| {
+            ProjectSettings::get_global(cx)
+                .lsp
+                .get(Self::SERVER_NAME)
+                .and_then(|s| s.binary.clone())
+        });
+
+        match configured_binary {
+            Ok(Some(BinarySettings {
+                path: Some(path),
+                arguments,
+                ..
+            })) => Some(LanguageServerBinary {
+                path: path.into(),
+                arguments: arguments
+                    .unwrap_or_default()
+                    .iter()
+                    .map(|arg| arg.into())
+                    .collect(),
+                env: None,
+            }),
+            Ok(Some(BinarySettings {
+                path_lookup: Some(false),
+                ..
+            })) => None,
+            _ => {
+                let env = delegate.shell_env().await;
+                let path = delegate.which(Self::SERVER_NAME.as_ref()).await?;
+                Some(LanguageServerBinary {
+                    path,
+                    arguments: server_binary_arguments(),
+                    env: Some(env),
+                })
+            }
+        }
     }
 
     fn will_fetch_server(
@@ -189,8 +229,11 @@ impl super::LspAdapter for GoLspAdapter {
             })
     }
 
-    fn initialization_options(&self) -> Option<serde_json::Value> {
-        Some(json!({
+    async fn initialization_options(
+        self: Arc<Self>,
+        _: &Arc<dyn LspAdapterDelegate>,
+    ) -> Result<Option<serde_json::Value>> {
+        Ok(Some(json!({
             "usePlaceholders": true,
             "hints": {
                 "assignVariableTypes": true,
@@ -201,7 +244,7 @@ impl super::LspAdapter for GoLspAdapter {
                 "parameterNames": true,
                 "rangeVariableTypes": true
             }
-        }))
+        })))
     }
 
     async fn label_for_completion(
@@ -365,7 +408,7 @@ impl super::LspAdapter for GoLspAdapter {
 }
 
 async fn get_cached_server_binary(container_dir: PathBuf) -> Option<LanguageServerBinary> {
-    async_maybe!({
+    maybe!(async {
         let mut last_binary_path = None;
         let mut entries = fs::read_dir(&container_dir).await?;
         while let Some(entry) = entries.next().await {
@@ -403,6 +446,156 @@ fn adjust_runs(
         range.end += delta;
     }
     runs
+}
+
+pub(crate) struct GoContextProvider;
+
+const GO_PACKAGE_TASK_VARIABLE: VariableName = VariableName::Custom(Cow::Borrowed("GO_PACKAGE"));
+const GO_SUBTEST_NAME_TASK_VARIABLE: VariableName =
+    VariableName::Custom(Cow::Borrowed("GO_SUBTEST_NAME"));
+
+impl ContextProvider for GoContextProvider {
+    fn build_context(
+        &self,
+        variables: &TaskVariables,
+        location: &Location,
+        cx: &mut gpui::AppContext,
+    ) -> Result<TaskVariables> {
+        let local_abs_path = location
+            .buffer
+            .read(cx)
+            .file()
+            .and_then(|file| Some(file.as_local()?.abs_path(cx)));
+
+        let go_package_variable = local_abs_path
+            .as_deref()
+            .and_then(|local_abs_path| local_abs_path.parent())
+            .map(|buffer_dir| {
+                // Prefer the relative form `./my-nested-package/is-here` over
+                // absolute path, because it's more readable in the modal, but
+                // the absolute path also works.
+                let package_name = variables
+                    .get(&VariableName::WorktreeRoot)
+                    .and_then(|worktree_abs_path| buffer_dir.strip_prefix(worktree_abs_path).ok())
+                    .map(|relative_pkg_dir| {
+                        if relative_pkg_dir.as_os_str().is_empty() {
+                            ".".into()
+                        } else {
+                            format!("./{}", relative_pkg_dir.to_string_lossy())
+                        }
+                    })
+                    .unwrap_or_else(|| format!("{}", buffer_dir.to_string_lossy()));
+
+                (GO_PACKAGE_TASK_VARIABLE.clone(), package_name.to_string())
+            });
+
+        let _subtest_name = variables.get(&VariableName::Custom(Cow::Borrowed("_subtest_name")));
+
+        let go_subtest_variable = extract_subtest_name(_subtest_name.unwrap_or(""))
+            .map(|subtest_name| (GO_SUBTEST_NAME_TASK_VARIABLE.clone(), subtest_name));
+
+        Ok(TaskVariables::from_iter(
+            [go_package_variable, go_subtest_variable]
+                .into_iter()
+                .flatten(),
+        ))
+    }
+
+    fn associated_tasks(
+        &self,
+        _: Option<Arc<dyn language::File>>,
+        _: &AppContext,
+    ) -> Option<TaskTemplates> {
+        Some(TaskTemplates(vec![
+            TaskTemplate {
+                label: format!(
+                    "go test {} -run {}",
+                    GO_PACKAGE_TASK_VARIABLE.template_value(),
+                    VariableName::Symbol.template_value(),
+                ),
+                command: "go".into(),
+                args: vec![
+                    "test".into(),
+                    GO_PACKAGE_TASK_VARIABLE.template_value(),
+                    "-run".into(),
+                    VariableName::Symbol.template_value(),
+                ],
+                tags: vec!["go-test".to_owned()],
+                ..TaskTemplate::default()
+            },
+            TaskTemplate {
+                label: format!("go test {}", GO_PACKAGE_TASK_VARIABLE.template_value()),
+                command: "go".into(),
+                args: vec!["test".into(), GO_PACKAGE_TASK_VARIABLE.template_value()],
+                ..TaskTemplate::default()
+            },
+            TaskTemplate {
+                label: "go test ./...".into(),
+                command: "go".into(),
+                args: vec!["test".into(), "./...".into()],
+                ..TaskTemplate::default()
+            },
+            TaskTemplate {
+                label: format!(
+                    "go test {} -run {}/{}",
+                    GO_PACKAGE_TASK_VARIABLE.template_value(),
+                    VariableName::Symbol.template_value(),
+                    GO_SUBTEST_NAME_TASK_VARIABLE.template_value(),
+                ),
+                command: "go".into(),
+                args: vec![
+                    "test".into(),
+                    GO_PACKAGE_TASK_VARIABLE.template_value(),
+                    "-v".into(),
+                    "-run".into(),
+                    format!(
+                        "^{}$/^{}$",
+                        VariableName::Symbol.template_value(),
+                        GO_SUBTEST_NAME_TASK_VARIABLE.template_value(),
+                    ),
+                ],
+                tags: vec!["go-subtest".to_owned()],
+                ..TaskTemplate::default()
+            },
+            TaskTemplate {
+                label: format!(
+                    "go test {} -bench {}",
+                    GO_PACKAGE_TASK_VARIABLE.template_value(),
+                    VariableName::Symbol.template_value()
+                ),
+                command: "go".into(),
+                args: vec![
+                    "test".into(),
+                    GO_PACKAGE_TASK_VARIABLE.template_value(),
+                    "-benchmem".into(),
+                    "-run=^$".into(),
+                    "-bench".into(),
+                    format!("^{}$", VariableName::Symbol.template_value()),
+                ],
+                tags: vec!["go-benchmark".to_owned()],
+                ..TaskTemplate::default()
+            },
+            TaskTemplate {
+                label: format!("go run {}", GO_PACKAGE_TASK_VARIABLE.template_value(),),
+                command: "go".into(),
+                args: vec!["run".into(), GO_PACKAGE_TASK_VARIABLE.template_value()],
+                tags: vec!["go-main".to_owned()],
+                ..TaskTemplate::default()
+            },
+        ]))
+    }
+}
+
+fn extract_subtest_name(input: &str) -> Option<String> {
+    let replaced_spaces = input.trim_matches('"').replace(' ', "_");
+
+    Some(
+        GO_ESCAPE_SUBTEST_NAME_REGEX
+            .replace_all(&replaced_spaces, |caps: &regex::Captures| {
+                format!("\\{}", &caps[0])
+            })
+            .to_string(),
+    )
 }
 
 #[cfg(test)]

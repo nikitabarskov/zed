@@ -8,12 +8,16 @@ license = "GPL-3.0-or-later"
 [lints]
 workspace = true
 
+[[bin]]
+name = "zed-extension"
+path = "src/main.rs"
+
 [dependencies]
 anyhow.workspace = true
 clap = { workspace = true, features = ["derive"] }
 env_logger.workspace = true
 fs.workspace = true
-extension.workspace = true
+extension = { workspace = true, features = ["no-webrtc"] }
 language.workspace = true
 log.workspace = true
 rpc.workspace = true

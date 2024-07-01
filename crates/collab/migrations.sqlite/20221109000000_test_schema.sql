@@ -45,12 +45,13 @@ CREATE UNIQUE INDEX "index_rooms_on_channel_id" ON "rooms" ("channel_id");
 
 CREATE TABLE "projects" (
     "id" INTEGER PRIMARY KEY AUTOINCREMENT,
-    "room_id" INTEGER REFERENCES rooms (id) ON DELETE CASCADE NOT NULL,
+    "room_id" INTEGER REFERENCES rooms (id) ON DELETE CASCADE,
     "host_user_id" INTEGER REFERENCES users (id),
     "host_connection_id" INTEGER,
     "host_connection_server_id" INTEGER REFERENCES servers (id) ON DELETE CASCADE,
     "unregistered" BOOLEAN NOT NULL DEFAULT FALSE,
-    "hosted_project_id" INTEGER REFERENCES hosted_projects (id)
+    "hosted_project_id" INTEGER REFERENCES hosted_projects (id),
+    "dev_server_project_id" INTEGER REFERENCES dev_server_projects(id)
 );
 CREATE INDEX "index_projects_on_host_connection_server_id" ON "projects" ("host_connection_server_id");
 CREATE INDEX "index_projects_on_host_connection_id_and_host_connection_server_id" ON "projects" ("host_connection_id", "host_connection_server_id");
@@ -219,6 +220,7 @@ CREATE TABLE IF NOT EXISTS "channel_messages" (
     "sender_id" INTEGER NOT NULL REFERENCES users (id),
     "body" TEXT NOT NULL,
     "sent_at" TIMESTAMP,
+    "edited_at" TIMESTAMP,
     "nonce" BLOB NOT NULL,
     "reply_to_message_id" INTEGER DEFAULT NULL
 );
@@ -372,6 +374,8 @@ CREATE TABLE extension_versions (
     authors TEXT NOT NULL,
     repository TEXT NOT NULL,
     description TEXT NOT NULL,
+    schema_version INTEGER NOT NULL DEFAULT 0,
+    wasm_api_version TEXT,
     download_count INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (extension_id, version)
 );
@@ -398,3 +402,17 @@ CREATE TABLE hosted_projects (
 );
 CREATE INDEX idx_hosted_projects_on_channel_id ON hosted_projects (channel_id);
 CREATE UNIQUE INDEX uix_hosted_projects_on_channel_id_and_name ON hosted_projects (channel_id, name) WHERE (deleted_at IS NULL);
+
+CREATE TABLE dev_servers (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL REFERENCES users(id),
+    name TEXT NOT NULL,
+    ssh_connection_string TEXT,
+    hashed_token TEXT NOT NULL
+);
+
+CREATE TABLE dev_server_projects (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    dev_server_id INTEGER NOT NULL REFERENCES dev_servers(id),
+    path TEXT NOT NULL
+);

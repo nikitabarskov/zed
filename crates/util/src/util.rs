@@ -1,16 +1,14 @@
 pub mod arc_cow;
 pub mod fs;
-pub mod github;
-pub mod http;
 pub mod paths;
-mod semantic_version;
+pub mod serde;
 #[cfg(any(test, feature = "test-support"))]
 pub mod test;
 
 use futures::Future;
-use lazy_static::lazy_static;
 use rand::{seq::SliceRandom, Rng};
-pub use semantic_version::*;
+use regex::Regex;
+use std::sync::OnceLock;
 use std::{
     borrow::Cow,
     cmp::{self, Ordering},
@@ -37,33 +35,147 @@ macro_rules! debug_panic {
     };
 }
 
+#[macro_export]
+macro_rules! with_clone {
+    ($i:ident, move ||$l:expr) => {{
+        let $i = $i.clone();
+        move || {
+            $l
+        }
+    }};
+    ($i:ident, move |$($k:pat_param),*|$l:expr) => {{
+        let $i = $i.clone();
+        move |$( $k ),*| {
+            $l
+        }
+    }};
+
+    (($($i:ident),+), move ||$l:expr) => {{
+        let ($($i),+) = ($($i.clone()),+);
+        move || {
+            $l
+        }
+    }};
+    (($($i:ident),+), move |$($k:pat_param),*|$l:expr) => {{
+        let ($($i),+) = ($($i.clone()),+);
+        move |$( $k ),*| {
+            $l
+        }
+    }};
+}
+
+mod test_with_clone {
+
+    // If this test compiles, it works
+    #[test]
+    fn test() {
+        let x = "String".to_string();
+        let y = std::sync::Arc::new(5);
+
+        fn no_arg(f: impl FnOnce()) {
+            f()
+        }
+
+        no_arg(with_clone!(x, move || {
+            drop(x);
+        }));
+
+        no_arg(with_clone!((x, y), move || {
+            drop(x);
+            drop(y);
+        }));
+
+        fn one_arg(f: impl FnOnce(usize)) {
+            f(1)
+        }
+
+        one_arg(with_clone!(x, move |_| {
+            drop(x);
+        }));
+        one_arg(with_clone!((x, y), move |b| {
+            drop(x);
+            drop(y);
+            println!("{}", b);
+        }));
+
+        fn two_arg(f: impl FnOnce(usize, bool)) {
+            f(5, true)
+        }
+
+        two_arg(with_clone!((x, y), move |a, b| {
+            drop(x);
+            drop(y);
+            println!("{}{}", a, b)
+        }));
+        two_arg(with_clone!((x, y), move |a, _| {
+            drop(x);
+            drop(y);
+            println!("{}", a)
+        }));
+        two_arg(with_clone!((x, y), move |_, b| {
+            drop(x);
+            drop(y);
+            println!("{}", b)
+        }));
+
+        struct Example {
+            z: usize,
+        }
+
+        fn destructuring_example(f: impl FnOnce(Example)) {
+            f(Example { z: 10 })
+        }
+
+        destructuring_example(with_clone!(x, move |Example { z }| {
+            drop(x);
+            println!("{}", z);
+        }));
+
+        let a_long_variable_1 = "".to_string();
+        let a_long_variable_2 = "".to_string();
+        let a_long_variable_3 = "".to_string();
+        let a_long_variable_4 = "".to_string();
+        two_arg(with_clone!(
+            (
+                x,
+                y,
+                a_long_variable_1,
+                a_long_variable_2,
+                a_long_variable_3,
+                a_long_variable_4
+            ),
+            move |a, b| {
+                drop(x);
+                drop(y);
+                drop(a_long_variable_1);
+                drop(a_long_variable_2);
+                drop(a_long_variable_3);
+                drop(a_long_variable_4);
+                println!("{}{}", a, b)
+            }
+        ));
+
+        fn single_expression_body(f: impl FnOnce(usize) -> usize) -> usize {
+            f(20)
+        }
+
+        let _result = single_expression_body(with_clone!(y, move |z| *y + z));
+
+        // Explicitly move all variables
+        drop(x);
+        drop(y);
+        drop(a_long_variable_1);
+        drop(a_long_variable_2);
+        drop(a_long_variable_3);
+        drop(a_long_variable_4);
+    }
+}
+
 pub fn truncate(s: &str, max_chars: usize) -> &str {
     match s.char_indices().nth(max_chars) {
         None => s,
         Some((idx, _)) => &s[..idx],
     }
-}
-
-pub fn http_proxy_from_env() -> Option<isahc::http::Uri> {
-    macro_rules! try_env {
-        ($($env:literal),+) => {
-            $(
-                if let Ok(env) = std::env::var($env) {
-                    return env.parse::<isahc::http::Uri>().ok();
-                }
-            )+
-        };
-    }
-
-    try_env!(
-        "ALL_PROXY",
-        "all_proxy",
-        "HTTPS_PROXY",
-        "https_proxy",
-        "HTTP_PROXY",
-        "http_proxy"
-    );
-    None
 }
 
 /// Removes characters from the end of the string if its length is greater than `max_chars` and
@@ -87,6 +199,19 @@ pub fn truncate_and_remove_front(s: &str, max_chars: usize) -> String {
     match truncation_ix {
         Some(length) => "…".to_string() + &s[length..],
         None => s.to_string(),
+    }
+}
+
+/// Takes only `max_lines` from the string and, if there were more than `max_lines-1`, appends a
+/// a newline and "..." to the string, so that `max_lines` are returned.
+/// Returns string unchanged if its length is smaller than max_lines.
+pub fn truncate_lines_and_trailoff(s: &str, max_lines: usize) -> String {
+    let mut lines = s.lines().take(max_lines).collect::<Vec<_>>();
+    if lines.len() > max_lines - 1 {
+        lines.pop();
+        lines.join("\n") + "\n…"
+    } else {
+        lines.join("\n")
     }
 }
 
@@ -116,6 +241,32 @@ where
             }
             start_index = index;
         }
+    }
+}
+
+/// Parse the result of calling `usr/bin/env` with no arguments
+pub fn parse_env_output(env: &str, mut f: impl FnMut(String, String)) {
+    let mut current_key: Option<String> = None;
+    let mut current_value: Option<String> = None;
+
+    for line in env.split_terminator('\n') {
+        if let Some(separator_index) = line.find('=') {
+            if &line[..separator_index] != "" {
+                if let Some((key, value)) = Option::zip(current_key.take(), current_value.take()) {
+                    f(key, value)
+                }
+                current_key = Some(line[..separator_index].to_string());
+                current_value = Some(line[separator_index + 1..].to_string());
+                continue;
+            };
+        }
+        if let Some(value) = current_value.as_mut() {
+            value.push('\n');
+            value.push_str(line);
+        }
+    }
+    if let Some((key, value)) = Option::zip(current_key.take(), current_value.take()) {
+        f(key, value)
     }
 }
 
@@ -159,13 +310,14 @@ pub fn merge_non_null_json_value_into(source: serde_json::Value, target: &mut se
 }
 
 pub fn measure<R>(label: &str, f: impl FnOnce() -> R) -> R {
-    lazy_static! {
-        pub static ref ZED_MEASUREMENTS: bool = env::var("ZED_MEASUREMENTS")
+    static ZED_MEASUREMENTS: OnceLock<bool> = OnceLock::new();
+    let zed_measurements = ZED_MEASUREMENTS.get_or_init(|| {
+        env::var("ZED_MEASUREMENTS")
             .map(|measurements| measurements == "1" || measurements == "true")
-            .unwrap_or(false);
-    }
+            .unwrap_or(false)
+    });
 
-    if *ZED_MEASUREMENTS {
+    if *zed_measurements {
         let start = Instant::now();
         let result = f();
         let elapsed = start.elapsed();
@@ -183,7 +335,6 @@ pub trait ResultExt<E> {
     /// Assert that this result should never be an error in development or tests.
     fn debug_assert_ok(self, reason: &str) -> Self;
     fn warn_on_err(self) -> Option<Self::Ok>;
-    fn inspect_error(self, func: impl FnOnce(&E)) -> Self;
 }
 
 impl<T, E> ResultExt<E> for Result<T, E>
@@ -197,8 +348,7 @@ where
         match self {
             Ok(value) => Some(value),
             Err(error) => {
-                let caller = Location::caller();
-                log::error!("{}:{}: {:?}", caller.file(), caller.line(), error);
+                log_error_with_caller(*Location::caller(), error, log::Level::Error);
                 None
             }
         }
@@ -212,24 +362,36 @@ where
         self
     }
 
+    #[track_caller]
     fn warn_on_err(self) -> Option<T> {
         match self {
             Ok(value) => Some(value),
             Err(error) => {
-                log::warn!("{:?}", error);
+                log_error_with_caller(*Location::caller(), error, log::Level::Warn);
                 None
             }
         }
     }
+}
 
-    /// https://doc.rust-lang.org/std/result/enum.Result.html#method.inspect_err
-    fn inspect_error(self, func: impl FnOnce(&E)) -> Self {
-        if let Err(err) = &self {
-            func(err);
-        }
+fn log_error_with_caller<E>(caller: core::panic::Location<'_>, error: E, level: log::Level)
+where
+    E: std::fmt::Debug,
+{
+    // In this codebase, the first segment of the file path is
+    // the 'crates' folder, followed by the crate name.
+    let target = caller.file().split('/').nth(1);
 
-        self
-    }
+    log::logger().log(
+        &log::Record::builder()
+            .target(target.unwrap_or(""))
+            .module_path(target)
+            .args(format_args!("{:?}", error))
+            .file(Some(caller.file()))
+            .line(Some(caller.line()))
+            .level(level)
+            .build(),
+    );
 }
 
 pub trait TryFutureExt {
@@ -305,13 +467,7 @@ where
             Poll::Ready(output) => Poll::Ready(match output {
                 Ok(output) => Some(output),
                 Err(error) => {
-                    log::log!(
-                        level,
-                        "{}:{}: {:?}",
-                        location.file(),
-                        location.line(),
-                        error
-                    );
+                    log_error_with_caller(location, error, level);
                     None
                 }
             }),
@@ -356,6 +512,7 @@ impl<F: FnOnce()> Drop for Deferred<F> {
 }
 
 /// Run the given function when the returned value is dropped (unless it's cancelled).
+#[must_use]
 pub fn defer<F: FnOnce()>(f: F) -> Deferred<F> {
     Deferred(Some(f))
 }
@@ -416,31 +573,20 @@ pub fn asset_str<A: rust_embed::RustEmbed>(path: &str) -> Cow<'static, str> {
     }
 }
 
-// copy unstable standard feature option unzip
-// https://github.com/rust-lang/rust/issues/87800
-// Remove when this ship in Rust 1.66 or 1.67
-pub fn unzip_option<T, U>(option: Option<(T, U)>) -> (Option<T>, Option<U>) {
-    match option {
-        Some((a, b)) => (Some(a), Some(b)),
-        None => (None, None),
-    }
-}
-
-/// Evaluates to an immediately invoked function expression. Good for using the ? operator
-/// in functions which do not return an Option or Result
+/// Expands to an immediately-invoked function expression. Good for using the ? operator
+/// in functions which do not return an Option or Result.
+///
+/// Accepts a normal block, an async block, or an async move block.
 #[macro_export]
 macro_rules! maybe {
     ($block:block) => {
         (|| $block)()
     };
-}
-
-/// Evaluates to an immediately invoked function expression. Good for using the ? operator
-/// in functions which do not return an Option or Result, but async.
-#[macro_export]
-macro_rules! async_maybe {
-    ($block:block) => {
-        (|| async move { $block })()
+    (async $block:block) => {
+        (|| async $block)()
+    };
+    (async move $block:block) => {
+        (|| async move $block)()
     };
 }
 
@@ -497,9 +643,8 @@ pub struct NumericPrefixWithSuffix<'a>(i32, &'a str);
 
 impl<'a> NumericPrefixWithSuffix<'a> {
     pub fn from_numeric_prefixed_str(str: &'a str) -> Option<Self> {
-        let mut chars = str.chars();
-        let prefix: String = chars.by_ref().take_while(|c| c.is_ascii_digit()).collect();
-        let remainder = chars.as_str();
+        let i = str.chars().take_while(|c| c.is_ascii_digit()).count();
+        let (prefix, remainder) = str.split_at(i);
 
         match prefix.parse::<i32>() {
             Ok(prefix) => Some(NumericPrefixWithSuffix(prefix, remainder)),
@@ -523,15 +668,17 @@ impl<'a> PartialOrd for NumericPrefixWithSuffix<'a> {
         Some(self.cmp(other))
     }
 }
-lazy_static! {
-    static ref EMOJI_REGEX: regex::Regex = regex::Regex::new("(\\p{Emoji}|\u{200D})").unwrap();
+
+fn emoji_regex() -> &'static Regex {
+    static EMOJI_REGEX: OnceLock<Regex> = OnceLock::new();
+    EMOJI_REGEX.get_or_init(|| Regex::new("(\\p{Emoji}|\u{200D})").unwrap())
 }
 
 /// Returns true if the given string consists of emojis only.
 /// E.g. "👨‍👩‍👧‍👧👋" will return true, but "👋!" will return false.
 pub fn word_consists_of_emojis(s: &str) -> bool {
     let mut prev_end = 0;
-    for capture in EMOJI_REGEX.find_iter(s) {
+    for capture in emoji_regex().find_iter(s) {
         if capture.start() != prev_end {
             return false;
         }
@@ -581,6 +728,57 @@ mod tests {
     }
 
     #[test]
+    fn test_numeric_prefix_str_method() {
+        let target = "1a";
+        assert_eq!(
+            NumericPrefixWithSuffix::from_numeric_prefixed_str(target),
+            Some(NumericPrefixWithSuffix(1, "a"))
+        );
+
+        let target = "12ab";
+        assert_eq!(
+            NumericPrefixWithSuffix::from_numeric_prefixed_str(target),
+            Some(NumericPrefixWithSuffix(12, "ab"))
+        );
+
+        let target = "12_ab";
+        assert_eq!(
+            NumericPrefixWithSuffix::from_numeric_prefixed_str(target),
+            Some(NumericPrefixWithSuffix(12, "_ab"))
+        );
+
+        let target = "1_2ab";
+        assert_eq!(
+            NumericPrefixWithSuffix::from_numeric_prefixed_str(target),
+            Some(NumericPrefixWithSuffix(1, "_2ab"))
+        );
+
+        let target = "1.2";
+        assert_eq!(
+            NumericPrefixWithSuffix::from_numeric_prefixed_str(target),
+            Some(NumericPrefixWithSuffix(1, ".2"))
+        );
+
+        let target = "1.2_a";
+        assert_eq!(
+            NumericPrefixWithSuffix::from_numeric_prefixed_str(target),
+            Some(NumericPrefixWithSuffix(1, ".2_a"))
+        );
+
+        let target = "12.2_a";
+        assert_eq!(
+            NumericPrefixWithSuffix::from_numeric_prefixed_str(target),
+            Some(NumericPrefixWithSuffix(12, ".2_a"))
+        );
+
+        let target = "12a.2_a";
+        assert_eq!(
+            NumericPrefixWithSuffix::from_numeric_prefixed_str(target),
+            Some(NumericPrefixWithSuffix(12, "a.2_a"))
+        );
+    }
+
+    #[test]
     fn test_numeric_prefix_with_suffix() {
         let mut sorted = vec!["1-abc", "10", "11def", "2", "21-abc"];
         sorted.sort_by_key(|s| {
@@ -614,5 +812,32 @@ mod tests {
         for (text, expected_result) in words_to_test {
             assert_eq!(word_consists_of_emojis(text), expected_result);
         }
+    }
+
+    #[test]
+    fn test_truncate_lines_and_trailoff() {
+        let text = r#"Line 1
+Line 2
+Line 3"#;
+
+        assert_eq!(
+            truncate_lines_and_trailoff(text, 2),
+            r#"Line 1
+…"#
+        );
+
+        assert_eq!(
+            truncate_lines_and_trailoff(text, 3),
+            r#"Line 1
+Line 2
+…"#
+        );
+
+        assert_eq!(
+            truncate_lines_and_trailoff(text, 4),
+            r#"Line 1
+Line 2
+Line 3"#
+        );
     }
 }

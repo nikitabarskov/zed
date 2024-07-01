@@ -14,14 +14,13 @@ doctest = false
 
 
 [dependencies]
-# TODO: when new version of this crate is released, change it
-alacritty_terminal = { git = "https://github.com/alacritty/alacritty", rev = "992011a4cd9a35f197acc0a0bd430d89a0d01013" }
+alacritty_terminal = { git = "https://github.com/alacritty/alacritty", rev = "cacdb5bb3b72bad2c729227537979d95af75978f" }
 anyhow.workspace = true
 collections.workspace = true
-dirs = "4.0.0"
+dirs.workspace = true
 futures.workspace = true
 gpui.workspace = true
-libc = "0.2"
+libc.workspace = true
 task.workspace = true
 schemars.workspace = true
 serde.workspace = true
