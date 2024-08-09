@@ -1338,6 +1338,7 @@ impl ProjectSearchBar {
             },
             font_family: settings.buffer_font.family.clone(),
             font_features: settings.buffer_font.features.clone(),
+            font_fallbacks: settings.buffer_font.fallbacks.clone(),
             font_size: rems(0.875).into(),
             font_weight: settings.buffer_font.weight,
             line_height: relative(1.3),
@@ -1413,7 +1414,8 @@ impl Render for ProjectSearchBar {
                                 .as_ref()
                                 .map(|search| search.read(cx).filters_enabled)
                                 .unwrap_or_default(),
-                        ),
+                        )
+                        .tooltip(|cx| Tooltip::for_action("Toggle filters", &ToggleFilters, cx)),
                 )
                 .child(
                     IconButton::new("project-search-toggle-replace", IconName::Replace)

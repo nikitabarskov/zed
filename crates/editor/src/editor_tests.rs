@@ -3785,6 +3785,7 @@ fn test_move_line_up_down_with_blocks(cx: &mut TestAppContext) {
                 disposition: BlockDisposition::Below,
                 height: 1,
                 render: Box::new(|_| div().into_any()),
+                priority: 0,
             }],
             Some(Autoscroll::fit()),
             cx,
@@ -10105,7 +10106,7 @@ struct Row8;
 struct Row9;
 struct Row10;"#};
 
-    // Deletion hunks trigger with carets on ajacent rows, so carets and selections have to stay farther to avoid the revert
+    // Deletion hunks trigger with carets on adjacent rows, so carets and selections have to stay farther to avoid the revert
     assert_hunk_revert(
         indoc! {r#"struct Row;
                    struct Row2;
